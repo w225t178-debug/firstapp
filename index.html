@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Obby Game - PC Version</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+  canvas { display: block; }
+  
+  #ui {
+    position: fixed; top: 0; left: 0; right: 0;
+    display: flex; justify-content: space-between; align-items: flex-start;
+    padding: 16px 20px; pointer-events: none; z-index: 10;
+  }
+  #stage-display {
+    background: rgba(0,0,0,0.55); backdrop-filter: blur(6px);
+    border: 1.5px solid rgba(255,255,255,0.15); border-radius: 12px;
+    padding: 10px 18px; color: #fff;
+  }
+  #stage-display .label { font-size: 11px; color: #aaa; text-transform: uppercase; letter-spacing: 1px; }
+  #stage-display .value { font-size: 22px; font-weight: 700; color: #f9c74f; }
+  
+  #controls-hint {
+    background: rgba(0,0,0,0.55); backdrop-filter: blur(6px);
+    border: 1.5px solid rgba(255,255,255,0.15); border-radius: 12px;
+    padding: 10px 16px; color: #ccc; font-size: 12px; line-height: 1.8; text-align: right;
+  }
+  
+  #message {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    background: rgba(0,0,0,0.8); border-radius: 16px;
+    padding: 24px 36px; color: #fff; font-size: 28px; font-weight: 700;
+    text-align: center; display: none; z-index: 20;
+    border: 2px solid rgba(255,255,255,0.2);
+  }
+  #message .sub { font-size: 14px; font-weight: 400; color: #aaa; margin-top: 8px; }
+  
+  #progress {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,0.55); backdrop-filter: blur(6px);
+    border: 1.5px solid rgba(255,255,255,0.15); border-radius: 24px;
+    padding: 8px 20px; display: flex; align-items: center; gap: 12px;
+    color: #ccc; font-size: 13px; pointer-events: none; z-index: 10;
+  }
+  #progress-bar-bg { width: 160px; height: 6px; background: rgba(255,255,255,0.15); border-radius: 3px; }
+  #progress-bar { height: 100%; background: #f9c74f; border-radius: 3px; transition: width 0.3s ease; }
+  #death-flash {
+    position: fixed; inset: 0; background: rgba(220,50,50,0.4);
+    pointer-events: none; opacity: 0; z-index: 15;
+    transition: opacity 0.1s ease;
+  }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <div id="stage-display">
+    <div class="label">STAGE</div>
+    <div class="value" id="stage-num">1</div>
+  </div>
+  <div id="controls-hint">
+    WASD / 矢印キー — 移動<br>
+    スペース — ジャンプ<br>
+    R — リスポーン<br>
+    ドラッグ — カメラ操作
+  </div>
+</div>
+
+<div id="progress">
+  <span>進行度</span>
+  <div id="progress-bar-bg"><div id="progress-bar" style="width:0%"></div></div>
+  <span id="progress-pct">0%</span>
+</div>
+
+<div id="message">
+  <div id="msg-text">スタート！</div>
+  <div class="sub" id="msg-sub"></div>
+</div>
+
+<div id="death-flash"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+window.onload = function() {
+  const W = window.innerWidth, H = window.innerHeight;
+  const SCALE = 0.5;
+
+  // --- Scene Setup ---
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87ceeb);
+  scene.fog = new THREE.Fog(0x87ceeb, 20, 60);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(W, H);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  document.body.appendChild(renderer.domElement);
+
+  const camera = new THREE.PerspectiveCamera(60, W/H, 0.1, 200);
+  camera.position.set(0, 4, 8);
+
+  // --- Lighting ---
+  const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+  scene.add(ambient);
+  const sun = new THREE.DirectionalLight(0xfff5e0, 1.2);
+  sun.position.set(15, 25, 10);
+  sun.castShadow = true;
+  sun.shadow.camera.left = -30;
+  sun.shadow.camera.right = 30;
+  sun.shadow.camera.top = 30;
+  sun.shadow.camera.bottom = -30;
+  scene.add(sun);
+
+  // --- Materials ---
+  const makeMat = (color) => new THREE.MeshLambertMaterial({ color });
+  const mats = {
+    platform: makeMat(0x4fc3f7),
+    grass:    makeMat(0x66bb6a),
+    lava:     makeMat(0xff5252),
+    checker:  makeMat(0xffd54f),
+    moving:   makeMat(0xce93d8),
+    ice:      makeMat(0xb3e5fc),
+    goal:     makeMat(0x69f0ae),
+    player:   makeMat(0xff7043),
+    head:     makeMat(0xffd54f),
+    checkpoint: makeMat(0x00e676)
+  };
+
+  // --- Helper ---
+  function makeBox(w, h, d, mat, x, y, z, addToScene = true) {
+    const geo = new THREE.BoxGeometry(w * SCALE, h * SCALE, d * SCALE);
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(x * SCALE, y * SCALE, z * SCALE);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    if (addToScene) scene.add(mesh);
+    return mesh;
+  }
+
+  // --- Stage Data ---
+  const PLATFORMS_DATA = [
+    { x:0,   y:0,   z:0,   w:6, h:0.8, d:6,  type:'grass' },
+    { x:0,   y:0,   z:-6,  w:3, h:0.8, d:3,  type:'normal' },
+    { x:3,   y:0,   z:-9,  w:3, h:0.8, d:3,  type:'normal' },
+    { x:6,   y:1,   z:-11, w:2.5, h:0.8, d:2.5, type:'checker' },
+    { x:9,   y:2,   z:-11, w:2.5, h:0.8, d:2.5, type:'checker' },
+    { x:12,  y:3,   z:-11, w:2.5, h:0.8, d:2.5, type:'normal' },
+    { x:12,  y:3,   z:-14, w:2.5, h:0.8, d:2.5, type:'normal' },
+    { x:12,  y:3,   z:-18, w:3,   h:0.8, d:3,   type:'moving_x', range:5, speed:1.2 },
+    { x:12,  y:3,   z:-24, w:3,   h:0.8, d:3,   type:'moving_x', range:6, speed:1.5 },
+    { x:12,  y:3,   z:-30, w:3.5, h:0.8, d:3.5, type:'normal' },
+    { x:12,  y:3,   z:-34, w:3.5, h:0.8, d:3.5, type:'checkpoint', id:1 },
+    { x:12,  y:3,   z:-39, w:2,   h:0.8, d:2,   type:'normal' },
+    { x:15,  y:3,   z:-42, w:2,   h:0.8, d:2,   type:'lava' },
+    { x:12,  y:3,   z:-45, w:2,   h:0.8, d:2,   type:'normal' },
+    { x:9,   y:3,   z:-42, w:2,   h:0.8, d:2,   type:'lava' },
+    { x:6,   y:3,   z:-45, w:2,   h:0.8, d:2,   type:'normal' },
+    { x:3,   y:3,   z:-42, w:2,   h:0.8, d:2,   type:'lava' },
+    { x:0,   y:3,   z:-45, w:2,   h:0.8, d:2,   type:'normal' },
+    { x:0,   y:3,   z:-50, w:3,   h:0.8, d:3,   type:'normal' },
+    { x:0,   y:5,   z:-54, w:2.5, h:0.8, d:2.5, type:'ice' },
+    { x:0,   y:7,   z:-58, w:2.5, h:0.8, d:2.5, type:'ice' },
+    { x:3,   y:9,   z:-61, w:2.5, h:0.8, d:2.5, type:'ice' },
+    { x:6,   y:11,  z:-61, w:2.5, h:0.8, d:2.5, type:'normal' },
+    { x:9,   y:11,  z:-61, w:3.5, h:0.8, d:3.5, type:'checkpoint', id:2 },
+    { x:9,   y:11,  z:-66, w:3,   h:0.8, d:3,   type:'moving_z', range:4, speed:1.0 },
+    { x:9,   y:11,  z:-72, w:3,   h:0.8, d:3,   type:'moving_x', range:5, speed:1.8 },
+    { x:9,   y:11,  z:-78, w:3,   h:0.8, d:3,   type:'moving_z', range:3, speed:2.2 },
+    { x:9,   y:11,  z:-84, w:3.5, h:0.8, d:3.5, type:'normal' },
+    { x:9,   y:11,  z:-88, w:2,   h:0.8, d:2,   type:'normal' },
+    { x:9,   y:11,  z:-92, w:2,   h:0.8, d:2,   type:'normal' },
+    { x:9,   y:11,  z:-96, w:2,   h:0.8, d:2,   type:'lava' },
+    { x:6,   y:11,  z:-99, w:2,   h:0.8, d:2,   type:'normal' },
+    { x:3,   y:11,  z:-102,w:2,   h:0.8, d:2,   type:'lava' },
+    { x:0,   y:11,  z:-105,w:2,   h:0.8, d:2,   type:'normal' },
+    { x:0,   y:11,  z:-110,w:4,   h:0.8, d:4,   type:'checkpoint', id:3 },
+    { x:0,   y:13,  z:-115,w:3,   h:0.8, d:3,   type:'checker' },
+    { x:0,   y:15,  z:-120,w:3,   h:0.8, d:3,   type:'moving_x', range:5, speed:2.5 },
+    { x:0,   y:17,  z:-125,w:3,   h:0.8, d:3,   type:'checker' },
+    { x:0,   y:19,  z:-130,w:3,   h:0.8, d:3,   type:'moving_z', range:4, speed:2.0 },
+    { x:0,   y:21,  z:-135,w:3,   h:0.8, d:3,   type:'checker' },
+    { x:0,   y:23,  z:-140,w:5,   h:0.8, d:5,   type:'goal' },
+  ];
+
+  const platformMeshes = [];
+  const checkpoints = {};
+
+  PLATFORMS_DATA.forEach(p => {
+    let mat;
+    switch(p.type) {
+      case 'grass': mat = mats.grass; break;
+      case 'lava': mat = mats.lava; break;
+      case 'checker': mat = mats.checker; break;
+      case 'moving_x': case 'moving_z': mat = mats.moving; break;
+      case 'checkpoint': mat = mats.checkpoint; break;
+      case 'goal': mat = mats.goal; break;
+      case 'ice': mat = mats.ice; break;
+      default: mat = mats.platform;
+    }
+    const mesh = makeBox(p.w, p.h, p.d, mat, p.x, p.y, p.z);
+    platformMeshes.push({ mesh, data: p, phase: Math.random() * Math.PI * 2 });
+    
+    if (p.type === 'checkpoint') {
+      checkpoints[p.id] = { x: p.x * SCALE, y: (p.y + 1) * SCALE, z: p.z * SCALE };
+    }
+  });
+
+  // --- Player Setup ---
+  const playerGroup = new THREE.Group();
+  scene.add(playerGroup);
+
+  const playerBody = makeBox(0.8, 1.0, 0.8, mats.player, 0, 0, 0, false);
+  playerGroup.add(playerBody);
+
+  const playerHead = new THREE.Mesh(new THREE.BoxGeometry(0.7*SCALE, 0.7*SCALE, 0.7*SCALE), mats.head);
+  playerHead.position.y = 0.55 * SCALE;
+  playerHead.castShadow = true;
+  playerGroup.add(playerHead);
+
+  // --- Game State ---
+  let pos = { x:0, y:1, z:0 };
+  let vel = { x:0, y:0, z:0 };
+  let onGround = false;
+  let lastCheckpoint = { x:0, y:1, z:0 };
+  let currentStage = 1;
+  let stageReached = 0;
+  let gameWon = false;
+  let deaths = 0;
+
+  const GRAVITY = -22 * SCALE;
+  const JUMP_FORCE = 8 * SCALE;
+  const SPEED = 7 * SCALE;
+
+  const keys = {};
+  window.addEventListener('keydown', e => keys[e.code] = true);
+  window.addEventListener('keyup', e => keys[e.code] = false);
+
+  // Camera Control
+  let camAngleY = 0;
+  const camDistance = 8;
+  const camHeight = 3.5;
+  let isDragging = false, lastMouseX = 0;
+
+  renderer.domElement.addEventListener('mousedown', e => { isDragging=true; lastMouseX=e.clientX; });
+  window.addEventListener('mouseup', () => isDragging=false);
+  window.addEventListener('mousemove', e => {
+    if (isDragging) {
+      camAngleY -= (e.clientX - lastMouseX) * 0.01;
+      lastMouseX = e.clientX;
+    }
+  });
+
+  const msgEl = document.getElementById('message');
+  const msgText = document.getElementById('msg-text');
+  const msgSub = document.getElementById('msg-sub');
+  const flashEl = document.getElementById('death-flash');
+  const stageNum = document.getElementById('stage-num');
+  const progressBar = document.getElementById('progress-bar');
+  const progressPct = document.getElementById('progress-pct');
+
+  function showMessage(text, sub, duration=2000) {
+    msgText.textContent = text;
+    msgSub.textContent = sub || '';
+    msgEl.style.display = 'block';
+    if (duration > 0) setTimeout(() => msgEl.style.display='none', duration);
+  }
+
+  function die() {
+    deaths++;
+    flashEl.style.opacity = '1';
+    setTimeout(() => { flashEl.style.opacity = '0'; }, 100);
+    pos = { ...lastCheckpoint };
+    vel = { x:0, y:0, z:0 };
+  }
+
+  function checkCollision() {
+    const pHW = 0.4 * SCALE;
+    const pMinX = pos.x - pHW, pMaxX = pos.x + pHW;
+    const pMinY = pos.y - 0.1, pMaxY = pos.y + (1.0 * SCALE);
+    const pMinZ = pos.z - pHW, pMaxZ = pos.z + pHW;
+
+    let grounded = false;
+    let standingOnIndex = null;
+
+    for (let i = 0; i < platformMeshes.length; i++) {
+      const pm = platformMeshes[i];
+      const box = new THREE.Box3().setFromObject(pm.mesh);
+      
+      if (pMaxX > box.min.x && pMinX < box.max.x &&
+          pMaxY > box.min.y && pMinY < box.max.y &&
+          pMaxZ > box.min.z && pMinZ < box.max.z) {
+        
+        const dBottom = pMaxY - box.min.y;
+        const dTop = box.max.y - pMinY;
+        
+        if (dTop < dBottom && vel.y <= 0) {
+          pos.y = box.max.y + 0.01;
+          vel.y = 0;
+          grounded = true;
+          
+          if (pm.data.type === 'lava') die();
+          if (pm.data.type === 'checkpoint' && pm.data.id > stageReached) {
+            stageReached = pm.data.id;
+            lastCheckpoint = { ...checkpoints[pm.data.id] };
+            currentStage = pm.data.id + 1;
+            stageNum.textContent = currentStage;
+            showMessage('✅ チェックポイント', `ステージ ${currentStage} 到達`);
+          }
+          if (pm.data.type === 'goal' && !gameWon) {
+            gameWon = true;
+            showMessage('🏆 ゴール！', `死亡回数: ${deaths}`);
+          }
+          if (pm.data.type.startsWith('moving')) standingOnIndex = i;
+        }
+      }
+    }
+    return { grounded, standingOnIndex };
+  }
+
+  let prevTime = performance.now();
+  showMessage('🎮 Obby PC Version', 'WASDで移動、Spaceでジャンプ');
+
+  function animate() {
+    requestAnimationFrame(animate);
+    const now = performance.now();
+    const dt = Math.min((now - prevTime) / 1000, 0.05);
+    prevTime = now;
+    const t = now * 0.001;
+
+    // Moving Platforms
+    platformMeshes.forEach(pm => {
+      const { data, phase } = pm;
+      const origX = data.x * SCALE;
+      const origZ = data.z * SCALE;
+      const range = data.range * SCALE;
+      if (data.type === 'moving_x') {
+        pm.mesh.position.x = origX + Math.sin(t * data.speed + phase) * range;
+      }
+      if (data.type === 'moving_z') {
+        pm.mesh.position.z = origZ + Math.sin(t * data.speed + phase) * range;
+      }
+    });
+
+    if (!gameWon) {
+      // Input Processing
+      const fw = keys['KeyW'] || keys['ArrowUp'];
+      const bk = keys['KeyS'] || keys['ArrowDown'];
+      const lt = keys['KeyA'] || keys['ArrowLeft'];
+      const rt = keys['KeyD'] || keys['ArrowRight'];
+      
+      // Calculate movement relative to camera angle
+      // Forward Vector (W)
+      const fwdX = Math.sin(camAngleY);
+      const fwdZ = Math.cos(camAngleY);
+      // Right Vector (D) -> Rotate 90 degrees CCW (Subtract PI/2)
+      const rgtX = Math.sin(camAngleY - Math.PI/2);
+      const rgtZ = Math.cos(camAngleY - Math.PI/2);
+
+      let moveX = 0, moveZ = 0;
+      // W -> 前進
+      if (fw) { moveX += fwdX; moveZ += fwdZ; }
+      // S -> 後退
+      if (bk) { moveX -= fwdX; moveZ -= fwdZ; }
+      // A -> 左 (右ベクトルの逆)
+      if (lt) { moveX -= rgtX; moveZ -= rgtZ; }
+      // D -> 右 (右ベクトル方向)
+      if (rt) { moveX += rgtX; moveZ += rgtZ; }
+
+      if (moveX !== 0 || moveZ !== 0) {
+        const len = Math.sqrt(moveX*moveX + moveZ*moveZ);
+        vel.x = (moveX/len) * SPEED;
+        vel.z = (moveZ/len) * SPEED;
+        // Face moving direction
+        playerGroup.rotation.y = Math.atan2(moveX, moveZ);
+      } else {
+        vel.x *= 0.8; vel.z *= 0.8;
+      }
+
+      if (keys['Space'] && onGround) {
+        vel.y = JUMP_FORCE;
+        onGround = false;
+      }
+      if (keys['KeyR']) die();
+
+      vel.y += GRAVITY * dt;
+      pos.x += vel.x * dt;
+      pos.y += vel.y * dt;
+      pos.z += vel.z * dt;
+
+      const col = checkCollision();
+      onGround = col.grounded;
+
+      // Stick to moving platforms
+      if (col.standingOnIndex !== null) {
+        const pm = platformMeshes[col.standingOnIndex];
+        const range = pm.data.range * SCALE;
+        const speed = pm.data.speed;
+        const phase = pm.phase;
+        if (pm.data.type === 'moving_x') {
+          pos.x += (Math.sin(t*speed+phase) - Math.sin((t-dt)*speed+phase)) * range;
+        }
+        if (pm.data.type === 'moving_z') {
+          pos.z += (Math.sin(t*speed+phase) - Math.sin((t-dt)*speed+phase)) * range;
+        }
+      }
+
+      if (pos.y < -5 * SCALE) die();
+
+      // UI Update
+      const progress = Math.min(100, Math.max(0, Math.round((pos.z / (-140 * SCALE)) * 100)));
+      progressBar.style.width = progress + '%';
+      progressPct.textContent = progress + '%';
+
+      playerGroup.position.set(pos.x, pos.y, pos.z);
+    }
+
+    // Camera Follow
+    const targetCamX = pos.x - Math.sin(camAngleY) * camDistance;
+    const targetCamZ = pos.z - Math.cos(camAngleY) * camDistance;
+    const targetCamY = pos.y + camHeight;
+    camera.position.lerp(new THREE.Vector3(targetCamX, targetCamY, targetCamZ), 0.1);
+    camera.lookAt(pos.x, pos.y + (0.5 * SCALE), pos.z);
+
+    renderer.render(scene, camera);
+  }
+
+  window.addEventListener('resize', () => {
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+  });
+
+  animate();
+};
+</script>
+</body>
+</html>
